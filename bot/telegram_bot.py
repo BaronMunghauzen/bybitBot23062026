@@ -86,8 +86,11 @@ class TelegramService:
     async def _send_pnl(self, update: Update) -> None:
         try:
             positions = await asyncio.to_thread(self.client.get_open_positions)
+            balance = await asyncio.to_thread(self.client.get_available_balance)
             text = self.trader.format_pnl_message(
-                positions, self.config.trading.settle_coin
+                positions,
+                self.config.trading.settle_coin,
+                balance,
             )
         except Exception as exc:
             logger.exception("Failed to fetch PnL")

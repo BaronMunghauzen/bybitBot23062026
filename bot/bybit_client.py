@@ -32,6 +32,7 @@ class PositionInfo:
     mark_price: float
     unrealised_pnl: float
     leverage: str
+    position_value: float
 
 
 @dataclass
@@ -39,6 +40,7 @@ class ClosedPosition:
     symbol: str
     side: str
     pnl: float
+    position_value: float
     success: bool
     error: str | None = None
 
@@ -334,16 +336,21 @@ class BybitClient:
             size = float(item.get("size") or 0)
             if size == 0:
                 continue
+            entry_price = float(item.get("avgPrice") or 0)
+            position_value = float(item.get("positionValue") or 0)
+            if position_value <= 0:
+                position_value = size * entry_price
             positions.append(
                 PositionInfo(
                     symbol=item.get("symbol", ""),
                     side=item.get("side", ""),
                     size=size,
                     size_str=str(item.get("size") or "0"),
-                    entry_price=float(item.get("avgPrice") or 0),
+                    entry_price=entry_price,
                     mark_price=float(item.get("markPrice") or 0),
                     unrealised_pnl=float(item.get("unrealisedPnl") or 0),
                     leverage=str(item.get("leverage") or "1"),
+                    position_value=position_value,
                 )
             )
         return positions
@@ -365,6 +372,7 @@ class BybitClient:
                         symbol=pos.symbol,
                         side=pos.side,
                         pnl=pos.unrealised_pnl,
+                        position_value=pos.position_value,
                         success=False,
                         error="qty below minimum",
                     )
@@ -379,6 +387,7 @@ class BybitClient:
                         symbol=pos.symbol,
                         side=pos.side,
                         pnl=pos.unrealised_pnl,
+                        position_value=pos.position_value,
                         success=True,
                     )
                 )
@@ -395,6 +404,7 @@ class BybitClient:
                         symbol=pos.symbol,
                         side=pos.side,
                         pnl=pos.unrealised_pnl,
+                        position_value=pos.position_value,
                         success=False,
                         error=str(exc),
                     )

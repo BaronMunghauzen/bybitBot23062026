@@ -107,6 +107,13 @@ class Trader:
         return self.scan_and_execute(balance, closed), closed
 
     @staticmethod
+    def _format_pnl_with_pct(pnl: float, base: float, settle_coin: str) -> str:
+        text = f"{pnl:+.4f} {settle_coin}"
+        if base > 0:
+            text += f" ({pnl / base * 100:+.2f}%)"
+        return text
+
+    @staticmethod
     def format_balance_message(
         balance: float,
         settle_coin: str,
@@ -131,15 +138,15 @@ class Trader:
         total_pnl = 0.0
         for pos in closed_positions:
             side = "Long" if pos.side == "Buy" else "Short"
+            pnl_text = Trader._format_pnl_with_pct(
+                pos.pnl, pos.position_value, settle_coin
+            )
             if pos.success:
                 total_pnl += pos.pnl
-                lines.append(
-                    f"  {pos.symbol} {side}: {pos.pnl:+.4f} {settle_coin}"
-                )
+                lines.append(f"  {pos.symbol} {side}: {pnl_text}")
             else:
                 lines.append(
-                    f"  {pos.symbol} {side}: не закрыта "
-                    f"(uPnL {pos.pnl:+.4f} {settle_coin})"
+                    f"  {pos.symbol} {side}: не закрыта (uPnL {pnl_text})"
                 )
                 if pos.error:
                     lines.append(f"    {pos.error}")
@@ -147,7 +154,10 @@ class Trader:
         successful = [p for p in closed_positions if p.success]
         if successful:
             lines.append("")
-            lines.append(f"Итого P/L: {total_pnl:+.4f} {settle_coin}")
+            lines.append(
+                "Итого P/L: "
+                + Trader._format_pnl_with_pct(total_pnl, balance, settle_coin)
+            )
 
         return "\n".join(lines)
 
@@ -197,7 +207,11 @@ class Trader:
         return "\n".join(lines)
 
     @staticmethod
-    def format_pnl_message(positions, settle_coin: str) -> str:
+    def format_pnl_message(
+        positions,
+        settle_coin: str,
+        balance: float | None = None,
+    ) -> str:
         if not positions:
             return "📈 Открытых позиций нет"
 
@@ -206,13 +220,24 @@ class Trader:
         for pos in positions:
             total_pnl += pos.unrealised_pnl
             side = "Long" if pos.side == "Buy" else "Short"
+            pnl_text = Trader._format_pnl_with_pct(
+                pos.unrealised_pnl, pos.position_value, settle_coin
+            )
             lines.append(
                 f"{pos.symbol} {side} x{pos.leverage}\n"
                 f"  size={pos.size} entry={pos.entry_price:.6f} "
                 f"mark={pos.mark_price:.6f}\n"
-                f"  uPnL={pos.unrealised_pnl:.4f} {settle_coin}"
+                f"  uPnL={pnl_text}"
             )
 
         lines.append("")
-        lines.append(f"Итого uPnL: {total_pnl:.4f} {settle_coin}")
+        if balance is not None and balance > 0:
+            lines.append(
+                "Итого uPnL: "
+                + Trader._format_pnl_with_pct(total_pnl, balance, settle_coin)
+            )
+        else:
+            lines.append(
+                f"Итого uPnL: {total_pnl:+.4f} {settle_coin}"
+            )
         return "\n".join(lines)
