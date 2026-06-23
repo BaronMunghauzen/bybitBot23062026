@@ -1,0 +1,51 @@
+# Copy to config.yaml and fill in your credentials.
+# config.yaml is in .gitignore — do not commit secrets.
+
+bybit:
+  api_key: "YOUR_BYBIT_API_KEY"
+  api_secret: "YOUR_BYBIT_API_SECRET"
+  # demo — paper trading (api-demo.bybit.com, keys from Demo Trading mode)
+  # mainnet — real trading (api.bybit.com)
+  # testnet — testnet (api-testnet.bybit.com)
+  mode: demo
+  # Request time window (ms). Increase if you see ErrCode 10002 (clock skew).
+  recv_window: 60000
+
+trading:
+  category: linear
+  settle_coin: USDT
+  candle_interval: D
+  # Seconds after daily candle close (UTC 00:00) before running the algorithm
+  delay_after_candle_seconds: 30
+  ma_fast: 50
+  ma_slow: 200
+  # Minimum closed daily candles required for slow MA (skip symbol if less)
+  min_candles_for_ma: 200
+  # 24h price change thresholds (%)
+  long_min_change_pct: 4.0
+  short_max_change_pct: -4.0
+  # Position leverage (1 = no leverage)
+  leverage: 1
+  # Account type for balance queries
+  account_type: UNIFIED
+
+telegram:
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  # Only this Telegram user ID receives messages and can poll PnL
+  allowed_user_id: 123456789
+  # Message or command that triggers open-positions PnL report
+  pnl_trigger: "/pnl"
+  # HTTP proxy for Telegram API (required if Telegram is blocked in your region)
+  # Leave proxy_host empty to disable proxy
+  proxy_host: ""
+  proxy_port: 0
+  proxy_username: ""
+  proxy_password: ""
+
+scheduler:
+  # Daily candle close time (UTC). Bybit 1D candles close at 00:00 UTC.
+  candle_close_hour_utc: 0
+  candle_close_minute_utc: 0
+
+logging:
+  level: INFO

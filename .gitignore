@@ -1,0 +1,30 @@
+# Secrets and local config
+config.yaml
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and runtime
+logs/
+*.log
+data/
+
+# OS
+.DS_Store
+Thumbs.db
