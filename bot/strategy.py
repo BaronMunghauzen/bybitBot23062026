@@ -73,6 +73,9 @@ class StrategyEngine:
         if not is_positive(last) or not is_negative(prev):
             return None
 
+        if not (last.open > ma_fast or last.close > ma_fast):
+            return None
+
         logger.info(
             "Long signal: %s change=%.2f%% MA%d=%.6f MA%d=%.6f",
             symbol,
@@ -107,6 +110,9 @@ class StrategyEngine:
         last = candles[-1]
         prev = candles[-2]
         if not is_negative(last) or not is_positive(prev):
+            return None
+
+        if not (last.open < ma_fast or last.close < ma_fast):
             return None
 
         logger.info(

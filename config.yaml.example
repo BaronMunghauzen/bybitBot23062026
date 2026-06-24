@@ -43,7 +43,9 @@ telegram:
   proxy_password: ""
 
 scheduler:
-  # Daily candle close time (UTC). Bybit 1D candles close at 00:00 UTC.
+  # Bybit 1D candles close at 00:00 UTC (03:00 Moscow time, UTC+3).
+  # Do NOT set Moscow time here — only UTC, as on the exchange.
+  # Bot run time = candle close + delay_after_candle_seconds (default 00:00:30 UTC).
   candle_close_hour_utc: 0
   candle_close_minute_utc: 0
 

@@ -63,6 +63,8 @@ class DailyScheduler:
             raise
 
     def start(self) -> None:
+        sched = self.config.scheduler
+        delay = self.config.trading.delay_after_candle_seconds
         hour, minute, second = self._run_time()
         self.scheduler.add_job(
             self.run_trading_cycle,
@@ -77,12 +79,28 @@ class DailyScheduler:
             misfire_grace_time=300,
         )
         self.scheduler.start()
+        close_utc = (
+            f"{sched.candle_close_hour_utc:02d}:"
+            f"{sched.candle_close_minute_utc:02d} UTC"
+        )
+        run_utc = f"{hour:02d}:{minute:02d}:{second:02d} UTC"
+        # MSK = UTC+3 year-round (no DST)
+        msk_offset = timedelta(hours=3)
+        close_msk = (
+            datetime(2000, 1, 1, sched.candle_close_hour_utc, sched.candle_close_minute_utc)
+            + msk_offset
+        ).strftime("%H:%M")
+        run_msk = (
+            datetime(2000, 1, 1, hour, minute, second) + msk_offset
+        ).strftime("%H:%M:%S")
         logger.info(
-            "Scheduler started: daily run at %02d:%02d:%02d UTC (+ %ss after candle close)",
-            hour,
-            minute,
-            second,
-            self.config.trading.delay_after_candle_seconds,
+            "Scheduler started: Bybit 1D candle closes at %s (%s MSK), "
+            "bot runs %s (%s MSK), delay=%ss",
+            close_utc,
+            close_msk,
+            run_utc,
+            run_msk,
+            delay,
         )
 
     def shutdown(self) -> None:
