@@ -200,12 +200,22 @@ class BybitClient:
         precision = max(0, int(round(-math.log10(step))))
         return f"{qty:.{precision}f}"
 
-    def _round_qty(self, qty: float, symbol: str, *, cap_to_max: bool = True) -> str:
+    def _round_qty(
+        self,
+        qty: float,
+        symbol: str,
+        *,
+        cap_to_max: bool = True,
+        market_order: bool = False,
+    ) -> str:
         info = self.get_instrument_info(symbol)
         lot = info.get("lotSizeFilter") or {}
         step = float(lot.get("qtyStep") or "0.001")
         min_qty = float(lot.get("minOrderQty") or step)
-        max_qty = float(lot.get("maxOrderQty") or lot.get("maxMktOrderQty") or 0)
+        if market_order:
+            max_qty = float(lot.get("maxMktOrderQty") or lot.get("maxOrderQty") or 0)
+        else:
+            max_qty = float(lot.get("maxOrderQty") or lot.get("maxMktOrderQty") or 0)
 
         if step <= 0:
             step = 0.001
@@ -290,7 +300,9 @@ class BybitClient:
                 )
 
             notional = usdt_amount * leverage
-            qty = self._round_qty(notional / ticker.last_price, symbol)
+            qty = self._round_qty(
+                notional / ticker.last_price, symbol, market_order=True
+            )
             if not qty:
                 return ExecutedOrder(
                     symbol=symbol,
@@ -325,90 +337,123 @@ class BybitClient:
             )
 
     def get_open_positions(self) -> list[PositionInfo]:
-        result = self._unwrap(
-            self.session.get_positions(
-                category=self.trading.category,
-                settleCoin=self.trading.settle_coin,
-            )
-        )
         positions: list[PositionInfo] = []
-        for item in result.get("list") or []:
-            size = float(item.get("size") or 0)
-            if size == 0:
-                continue
-            entry_price = float(item.get("avgPrice") or 0)
-            position_value = float(item.get("positionValue") or 0)
-            if position_value <= 0:
-                position_value = size * entry_price
-            positions.append(
-                PositionInfo(
-                    symbol=item.get("symbol", ""),
-                    side=item.get("side", ""),
-                    size=size,
-                    size_str=str(item.get("size") or "0"),
-                    entry_price=entry_price,
-                    mark_price=float(item.get("markPrice") or 0),
-                    unrealised_pnl=float(item.get("unrealisedPnl") or 0),
-                    leverage=str(item.get("leverage") or "1"),
-                    position_value=position_value,
+        cursor: str | None = None
+
+        while True:
+            params: dict[str, Any] = {
+                "category": self.trading.category,
+                "settleCoin": self.trading.settle_coin,
+                "limit": 200,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            result = self._unwrap(self.session.get_positions(**params))
+
+            for item in result.get("list") or []:
+                size = float(item.get("size") or 0)
+                if size == 0:
+                    continue
+                entry_price = float(item.get("avgPrice") or 0)
+                position_value = float(item.get("positionValue") or 0)
+                if position_value <= 0:
+                    position_value = size * entry_price
+                positions.append(
+                    PositionInfo(
+                        symbol=item.get("symbol", ""),
+                        side=item.get("side", ""),
+                        size=size,
+                        size_str=str(item.get("size") or "0"),
+                        entry_price=entry_price,
+                        mark_price=float(item.get("markPrice") or 0),
+                        unrealised_pnl=float(item.get("unrealisedPnl") or 0),
+                        leverage=str(item.get("leverage") or "1"),
+                        position_value=position_value,
+                    )
                 )
-            )
+
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+
         return positions
+
+    def _close_position(self, pos: PositionInfo) -> ClosedPosition:
+        close_side = "Sell" if pos.side == "Buy" else "Buy"
+        qty = self._qty_from_position(pos.size_str, pos.symbol)
+        if not qty:
+            logger.warning(
+                "Skip close %s: qty %s below minimum",
+                pos.symbol,
+                pos.size_str,
+            )
+            return ClosedPosition(
+                symbol=pos.symbol,
+                side=pos.side,
+                pnl=pos.unrealised_pnl,
+                position_value=pos.position_value,
+                success=False,
+                error="qty below minimum",
+            )
+        try:
+            self.place_market_order(pos.symbol, close_side, qty, reduce_only=True)
+            logger.info(
+                "Closed position: %s (%s) PnL=%.4f",
+                pos.symbol,
+                pos.side,
+                pos.unrealised_pnl,
+            )
+            return ClosedPosition(
+                symbol=pos.symbol,
+                side=pos.side,
+                pnl=pos.unrealised_pnl,
+                position_value=pos.position_value,
+                success=True,
+            )
+        except Exception as exc:
+            logger.error("Failed to close %s: %s", pos.symbol, exc)
+            return ClosedPosition(
+                symbol=pos.symbol,
+                side=pos.side,
+                pnl=pos.unrealised_pnl,
+                position_value=pos.position_value,
+                success=False,
+                error=str(exc),
+            )
 
     def close_all_positions(self) -> list[ClosedPosition]:
         closed: list[ClosedPosition] = []
-        positions = self.get_open_positions()
-        for pos in positions:
-            close_side = "Sell" if pos.side == "Buy" else "Buy"
-            qty = self._qty_from_position(pos.size_str, pos.symbol)
-            if not qty:
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            positions = self.get_open_positions()
+            if not positions:
+                break
+
+            if attempt > 1:
                 logger.warning(
-                    "Skip close %s: qty %s below minimum",
-                    pos.symbol,
-                    pos.size_str,
+                    "Retry closing positions (attempt %s/%s, open=%s)",
+                    attempt,
+                    max_attempts,
+                    len(positions),
                 )
-                closed.append(
-                    ClosedPosition(
-                        symbol=pos.symbol,
-                        side=pos.side,
-                        pnl=pos.unrealised_pnl,
-                        position_value=pos.position_value,
-                        success=False,
-                        error="qty below minimum",
-                    )
-                )
-                continue
-            try:
-                self.place_market_order(
-                    pos.symbol, close_side, qty, reduce_only=True
-                )
-                closed.append(
-                    ClosedPosition(
-                        symbol=pos.symbol,
-                        side=pos.side,
-                        pnl=pos.unrealised_pnl,
-                        position_value=pos.position_value,
-                        success=True,
-                    )
-                )
-                logger.info(
-                    "Closed position: %s (%s) PnL=%.4f",
-                    pos.symbol,
-                    pos.side,
-                    pos.unrealised_pnl,
-                )
-            except Exception as exc:
-                logger.error("Failed to close %s: %s", pos.symbol, exc)
-                closed.append(
-                    ClosedPosition(
-                        symbol=pos.symbol,
-                        side=pos.side,
-                        pnl=pos.unrealised_pnl,
-                        position_value=pos.position_value,
-                        success=False,
-                        error=str(exc),
-                    )
-                )
+
+            for pos in positions:
+                result = self._close_position(pos)
+                closed.append(result)
+
+            if not self.get_open_positions():
+                break
+
+        remaining = self.get_open_positions()
+        if remaining:
+            logger.error(
+                "Could not close all positions: %s still open (%s)",
+                len(remaining),
+                ", ".join(p.symbol for p in remaining),
+            )
+
         return closed
 
     @classmethod

@@ -162,13 +162,21 @@ class Trader:
         return "\n".join(lines)
 
     @staticmethod
+    def _short_error(error: str, limit: int = 100) -> str:
+        first_line = error.split("\n", 1)[0].strip()
+        if len(first_line) <= limit:
+            return first_line
+        return first_line[: limit - 3] + "..."
+
+    @staticmethod
     def format_cycle_result_message(result: TradingCycleResult, cfg: AppConfig) -> str:
         lines = ["📊 Результат торгового цикла", ""]
 
-        if result.closed_symbols:
-            lines.append(
-                f"Закрыты позиции: {', '.join(result.closed_symbols)}"
-            )
+        unique_closed = list(dict.fromkeys(result.closed_symbols))
+        if unique_closed:
+            lines.append(f"Закрыто позиций: {len(unique_closed)}")
+            if len(unique_closed) <= 15:
+                lines.append(", ".join(unique_closed))
         else:
             lines.append("Закрытые позиции: нет")
 
@@ -198,7 +206,7 @@ class Trader:
                     f"qty={order.qty} margin={order.usdt_amount:.4f}"
                 )
                 if order.error:
-                    line += f" — {order.error}"
+                    line += f" — {Trader._short_error(order.error)}"
                 lines.append(line)
         else:
             lines.append("")

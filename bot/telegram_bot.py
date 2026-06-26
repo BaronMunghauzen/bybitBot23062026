@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+TELEGRAM_MAX_MESSAGE_LEN = 4000
+
 
 class TelegramService:
     def __init__(
@@ -97,7 +99,8 @@ class TelegramService:
             text = f"Ошибка получения PnL: {exc}"
 
         if update.effective_message:
-            await update.effective_message.reply_text(text)
+            for chunk in self._split_message(text):
+                await update.effective_message.reply_text(chunk)
 
     async def _get_bot(self) -> Bot:
         if self.app is not None:
@@ -109,13 +112,43 @@ class TelegramService:
             )
         return self._standalone_bot
 
+    @staticmethod
+    def _split_message(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LEN) -> list[str]:
+        if len(text) <= max_len:
+            return [text]
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+
+        for line in text.split("\n"):
+            line_len = len(line) + 1
+            if current and current_len + line_len > max_len:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
     async def send_message(self, text: str) -> None:
         try:
             bot = await self._get_bot()
-            await bot.send_message(
-                chat_id=self.config.telegram.allowed_user_id,
-                text=text,
-            )
+            chunks = self._split_message(text)
+            for index, chunk in enumerate(chunks, start=1):
+                if len(chunks) > 1:
+                    prefix = f"[{index}/{len(chunks)}]\n"
+                    payload = prefix + chunk if len(prefix) + len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN else chunk
+                else:
+                    payload = chunk
+                await bot.send_message(
+                    chat_id=self.config.telegram.allowed_user_id,
+                    text=payload,
+                )
         except Exception:
             logger.exception("Failed to send Telegram message")
 
