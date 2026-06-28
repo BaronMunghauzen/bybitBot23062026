@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from bot.bybit_client import BybitClient
@@ -9,6 +10,8 @@ from bot.config import TradingConfig
 from bot.indicators import daily_change_pct, parse_klines
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[int, int], None]
 
 
 @dataclass
@@ -25,6 +28,7 @@ class HypotheticalAnalysisResult:
     threshold_pct: float
     symbols: list[HypotheticalSymbolResult]
     scanned_symbols: int
+    total_symbols: int
     elapsed_seconds: float
 
     @property
@@ -41,47 +45,58 @@ class HypotheticalAnalyzer:
         self.client = client
         self.cfg = trading_cfg
 
-    def run_long_analysis(self) -> HypotheticalAnalysisResult:
+    def run_long_analysis(
+        self,
+        on_progress: ProgressCallback | None = None,
+    ) -> HypotheticalAnalysisResult:
         started = time.monotonic()
         tickers = self.client.get_linear_tickers()
         prices = {t.symbol: t.last_price for t in tickers}
+        total = len(tickers)
 
         # Pre-filter by ticker 24h change to avoid hundreds of kline API calls.
         prefilter_pct = max(2.0, self.cfg.long_min_change_pct - 0.5)
-        candidates = [t for t in tickers if t.change_pct_24h > prefilter_pct]
         logger.info(
-            "Hypothetical analysis started: %s symbols to scan (prefilter > %.2f%%, total %s)",
-            len(candidates),
+            "Hypothetical analysis started: %s futures total (kline check if 24h > %.2f%%)",
+            total,
             prefilter_pct,
-            len(tickers),
         )
+        if on_progress is not None:
+            on_progress(0, total)
 
         results: list[HypotheticalSymbolResult] = []
-        for index, ticker in enumerate(candidates, start=1):
-            if index % 10 == 0 or index == len(candidates):
+        for index, ticker in enumerate(tickers, start=1):
+            if index % 50 == 0 or index == total:
                 logger.info(
                     "Hypothetical analysis progress: %s/%s",
                     index,
-                    len(candidates),
+                    total,
                 )
             try:
+                if ticker.change_pct_24h <= prefilter_pct:
+                    continue
                 item = self._analyze_symbol(ticker.symbol, prices)
                 if item:
                     results.append(item)
             except Exception:
                 logger.exception("Hypothetical analysis failed for %s", ticker.symbol)
+            finally:
+                if on_progress is not None:
+                    on_progress(index, total)
 
         results.sort(key=lambda item: item.last_closed_change_pct, reverse=True)
         elapsed = time.monotonic() - started
         logger.info(
-            "Hypothetical analysis finished: %s matches in %.1fs",
+            "Hypothetical analysis finished: %s matches in %.1fs (%s futures checked)",
             len(results),
             elapsed,
+            total,
         )
         return HypotheticalAnalysisResult(
             threshold_pct=self.cfg.long_min_change_pct,
             symbols=results,
-            scanned_symbols=len(candidates),
+            scanned_symbols=total,
+            total_symbols=total,
             elapsed_seconds=elapsed,
         )
 
@@ -123,7 +138,7 @@ class HypotheticalAnalyzer:
             "",
             f"Фильтр: последняя закрытая 1D свеча > {result.threshold_pct:.2f}%",
             "Прибыль: от open текущей 1D свечи до текущей цены",
-            f"Проверено символов: {result.scanned_symbols} "
+            f"Проверено: {result.scanned_symbols} из {result.total_symbols} "
             f"({result.elapsed_seconds:.0f} сек)",
             "",
         ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from telegram import Bot, Update
@@ -117,12 +118,43 @@ class TelegramService:
 
     async def _send_hypothetical(self, update: Update) -> None:
         chat_id = self.config.telegram.allowed_user_id
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                "Считаю гипотетический анализ (~30-60 сек), подождите..."
+        bot = await self._get_bot()
+        progress_message = await bot.send_message(
+            chat_id=chat_id,
+            text="Считаю гипотетический анализ, загружаю фьючерсы...",
+        )
+        loop = asyncio.get_running_loop()
+        last_progress_update = 0.0
+
+        async def update_progress(checked: int, total: int) -> None:
+            text = f"Гипотетический анализ\nПроверено {checked} из {total}"
+            try:
+                await bot.edit_message_text(
+                    text=text,
+                    chat_id=chat_id,
+                    message_id=progress_message.message_id,
+                )
+            except Exception:
+                logger.debug("Skipped hypothetical progress update", exc_info=True)
+
+        def on_progress(checked: int, total: int) -> None:
+            nonlocal last_progress_update
+            now = time.monotonic()
+            if checked not in (0, total) and checked % 25 != 0:
+                if now - last_progress_update < 2.0:
+                    return
+            last_progress_update = now
+            asyncio.run_coroutine_threadsafe(
+                update_progress(checked, total),
+                loop,
             )
+
+        result = None
         try:
-            result = await asyncio.to_thread(self.hypothetical.run_long_analysis)
+            result = await asyncio.to_thread(
+                self.hypothetical.run_long_analysis,
+                on_progress,
+            )
             text = HypotheticalAnalyzer.format_message(
                 result, self.config.trading.settle_coin
             )
@@ -130,8 +162,13 @@ class TelegramService:
             logger.exception("Failed to run hypothetical analysis")
             text = f"Ошибка гипотетического анализа: {exc}"
 
+        if result is not None:
+            try:
+                await update_progress(result.scanned_symbols, result.total_symbols)
+            except Exception:
+                pass
+
         try:
-            bot = await self._get_bot()
             for chunk in self._split_message(text):
                 await bot.send_message(chat_id=chat_id, text=chunk)
         except Exception:
