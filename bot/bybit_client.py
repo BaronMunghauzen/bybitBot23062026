@@ -169,15 +169,24 @@ class BybitClient:
             )
         return tickers
 
-    def get_klines(self, symbol: str, limit: int) -> list[list[str]]:
-        result = self._unwrap(
-            self.session.get_kline(
-                category=self.trading.category,
-                symbol=symbol,
-                interval=self.trading.candle_interval,
-                limit=limit,
-            )
-        )
+    def get_klines(
+        self,
+        symbol: str,
+        limit: int,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list[list[str]]:
+        params: dict[str, Any] = {
+            "category": self.trading.category,
+            "symbol": symbol,
+            "interval": self.trading.candle_interval,
+            "limit": limit,
+        }
+        if start_ms is not None:
+            params["start"] = start_ms
+        if end_ms is not None:
+            params["end"] = end_ms
+        result = self._unwrap(self.session.get_kline(**params))
         rows = result.get("list") or []
         rows.reverse()
         return rows

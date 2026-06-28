@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import date
 from typing import TYPE_CHECKING
 
 from telegram import Bot, Update
@@ -70,7 +71,8 @@ class TelegramService:
         await update.effective_message.reply_text(
             "Bybit futures bot is running.\n"
             f"Send `{trigger}` to get open positions PnL.\n"
-            f"Send `{hypo}` for hypothetical long analysis.",
+            f"Send `{hypo}` for hypothetical long analysis.\n"
+            f"Send `{hypo} 2026-06-24` for a specific entry day (UTC).",
             parse_mode="Markdown",
         )
 
@@ -84,7 +86,17 @@ class TelegramService:
         if not self._is_allowed(update):
             await self._reject_unauthorized(update)
             return
-        await self._send_hypothetical(update)
+        entry_date = None
+        if context.args:
+            entry_date = HypotheticalAnalyzer.parse_entry_date(context.args[0])
+            if entry_date is None:
+                if update.effective_message:
+                    await update.effective_message.reply_text(
+                        "Формат: /whatif или /whatif 2026-06-24 (также 24.06.2026). "
+                        "Дата — день входа по UTC."
+                    )
+                return
+        await self._send_hypothetical(update, entry_date)
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
@@ -96,8 +108,15 @@ class TelegramService:
         if text.lower() == self.config.telegram.pnl_trigger.strip().lower():
             await self._send_pnl(update)
             return
-        if text.lower() == self.config.telegram.hypothetical_trigger.strip().lower():
-            await self._send_hypothetical(update)
+        matched, entry_date, error = HypotheticalAnalyzer.parse_request(
+            text,
+            self.config.telegram.hypothetical_trigger,
+        )
+        if matched:
+            if error and update.effective_message:
+                await update.effective_message.reply_text(error)
+                return
+            await self._send_hypothetical(update, entry_date)
 
     async def _send_pnl(self, update: Update) -> None:
         try:
@@ -116,21 +135,33 @@ class TelegramService:
             for chunk in self._split_message(text):
                 await update.effective_message.reply_text(chunk)
 
-    async def _send_hypothetical(self, update: Update) -> None:
+    async def _send_hypothetical(
+        self,
+        update: Update,
+        entry_date: date | None = None,
+    ) -> None:
         chat_id = self.config.telegram.allowed_user_id
         bot = await self._get_bot()
-        progress_message = await bot.send_message(
-            chat_id=chat_id,
-            text="Считаю гипотетический анализ, загружаю фьючерсы...",
-        )
+        if entry_date is not None:
+            intro = (
+                f"Считаю гипотетический анализ за {entry_date.isoformat()}, "
+                "загружаю фьючерсы..."
+            )
+        else:
+            intro = "Считаю гипотетический анализ, загружаю фьючерсы..."
+        progress_message = await bot.send_message(chat_id=chat_id, text=intro)
         loop = asyncio.get_running_loop()
         last_progress_update = 0.0
 
         async def update_progress(checked: int, total: int) -> None:
-            text = f"Гипотетический анализ\nПроверено {checked} из {total}"
+            if entry_date is not None:
+                header = f"Гипотетический анализ за {entry_date.isoformat()}"
+            else:
+                header = "Гипотетический анализ"
+            progress_text = f"{header}\nПроверено {checked} из {total}"
             try:
                 await bot.edit_message_text(
-                    text=text,
+                    text=progress_text,
                     chat_id=chat_id,
                     message_id=progress_message.message_id,
                 )
@@ -154,6 +185,7 @@ class TelegramService:
             result = await asyncio.to_thread(
                 self.hypothetical.run_long_analysis,
                 on_progress,
+                entry_date,
             )
             text = HypotheticalAnalyzer.format_message(
                 result, self.config.trading.settle_coin
