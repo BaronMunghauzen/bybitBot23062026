@@ -41,6 +41,7 @@ class TelegramConfig:
     bot_token: str
     allowed_user_id: int
     pnl_trigger: str
+    hypothetical_trigger: str
     proxy_host: str
     proxy_port: int
     proxy_username: str
@@ -130,6 +131,9 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
             bot_token=str(_require(telegram_raw, "bot_token")),
             allowed_user_id=int(_require(telegram_raw, "allowed_user_id")),
             pnl_trigger=str(telegram_raw.get("pnl_trigger", "/pnl")),
+            hypothetical_trigger=str(
+                telegram_raw.get("hypothetical_trigger", "/whatif")
+            ),
             proxy_host=str(telegram_raw.get("proxy_host", "")),
             proxy_port=int(telegram_raw.get("proxy_port", 0)),
             proxy_username=str(telegram_raw.get("proxy_username", "")),

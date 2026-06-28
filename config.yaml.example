@@ -35,6 +35,8 @@ telegram:
   allowed_user_id: 123456789
   # Message or command that triggers open-positions PnL report
   pnl_trigger: "/pnl"
+  # Hypothetical long PnL from current 1D candle open (last closed 1D > long_min_change_pct)
+  hypothetical_trigger: "/whatif"
   # HTTP proxy for Telegram API (required if Telegram is blocked in your region)
   # Leave proxy_host empty to disable proxy
   proxy_host: ""

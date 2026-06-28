@@ -9,6 +9,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from telegram.request import HTTPXRequest
 
 from bot.config import AppConfig
+from bot.hypothetical_analysis import HypotheticalAnalyzer
 from bot.trader import Trader
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ class TelegramService:
         self.config = config
         self.client = client
         self.trader = trader
+        self.hypothetical = HypotheticalAnalyzer(client, config.trading)
         self.app: Application | None = None
         self._standalone_bot: Bot | None = None
         self._http_request = self._build_http_request()
@@ -63,9 +65,11 @@ class TelegramService:
             await self._reject_unauthorized(update)
             return
         trigger = self.config.telegram.pnl_trigger
+        hypo = self.config.telegram.hypothetical_trigger
         await update.effective_message.reply_text(
             "Bybit futures bot is running.\n"
-            f"Send `{trigger}` to get open positions PnL.",
+            f"Send `{trigger}` to get open positions PnL.\n"
+            f"Send `{hypo}` for hypothetical long analysis.",
             parse_mode="Markdown",
         )
 
@@ -75,15 +79,24 @@ class TelegramService:
             return
         await self._send_pnl(update)
 
+    async def cmd_whatif(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_allowed(update):
+            await self._reject_unauthorized(update)
+            return
+        await self._send_hypothetical(update)
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
             return
         message = update.effective_message
         if message is None or message.text is None:
             return
-        trigger = self.config.telegram.pnl_trigger.strip()
-        if message.text.strip().lower() == trigger.lower():
+        text = message.text.strip()
+        if text.lower() == self.config.telegram.pnl_trigger.strip().lower():
             await self._send_pnl(update)
+            return
+        if text.lower() == self.config.telegram.hypothetical_trigger.strip().lower():
+            await self._send_hypothetical(update)
 
     async def _send_pnl(self, update: Update) -> None:
         try:
@@ -101,6 +114,32 @@ class TelegramService:
         if update.effective_message:
             for chunk in self._split_message(text):
                 await update.effective_message.reply_text(chunk)
+
+    async def _send_hypothetical(self, update: Update) -> None:
+        chat_id = self.config.telegram.allowed_user_id
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "Считаю гипотетический анализ (~30-60 сек), подождите..."
+            )
+        try:
+            result = await asyncio.to_thread(self.hypothetical.run_long_analysis)
+            text = HypotheticalAnalyzer.format_message(
+                result, self.config.trading.settle_coin
+            )
+        except Exception as exc:
+            logger.exception("Failed to run hypothetical analysis")
+            text = f"Ошибка гипотетического анализа: {exc}"
+
+        try:
+            bot = await self._get_bot()
+            for chunk in self._split_message(text):
+                await bot.send_message(chat_id=chat_id, text=chunk)
+        except Exception:
+            logger.exception("Failed to send hypothetical analysis to Telegram")
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "Не удалось отправить результат в Telegram. Смотрите логи."
+                )
 
     async def _get_bot(self) -> Bot:
         if self.app is not None:
@@ -179,6 +218,9 @@ class TelegramService:
         )
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("pnl", self.cmd_pnl))
+        hypo_command = self.config.telegram.hypothetical_trigger.strip().lstrip("/")
+        if hypo_command and hypo_command.isalnum():
+            self.app.add_handler(CommandHandler(hypo_command, self.cmd_whatif))
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message)
         )
