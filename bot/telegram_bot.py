@@ -12,7 +12,7 @@ from telegram.request import HTTPXRequest
 
 from bot.config import AppConfig
 from bot.hypothetical_analysis import HypotheticalAnalyzer
-from bot.trader import Trader
+from bot.trader import TakeProfitCheckResult, Trader
 
 if TYPE_CHECKING:
     from bot.bybit_client import BybitClient, ClosedPosition
@@ -68,11 +68,13 @@ class TelegramService:
             return
         trigger = self.config.telegram.pnl_trigger
         hypo = self.config.telegram.hypothetical_trigger
+        tp = self.config.telegram.take_profit_trigger
         await update.effective_message.reply_text(
             "Bybit futures bot is running.\n"
             f"Send `{trigger}` to get open positions PnL.\n"
-            f"Send `{hypo}` for hypothetical long analysis.\n"
-            f"Send `{hypo} 2026-06-24` for a specific entry day (UTC).",
+            f"Send `{hypo}` for hypothetical long+short analysis.\n"
+            f"Send `{hypo} 2026-06-24` for a specific entry day (UTC).\n"
+            f"Send `{tp}` to run take profit check manually.",
             parse_mode="Markdown",
         )
 
@@ -98,6 +100,12 @@ class TelegramService:
                 return
         await self._send_hypothetical(update, entry_date)
 
+    async def cmd_tpcheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_allowed(update):
+            await self._reject_unauthorized(update)
+            return
+        await self._send_take_profit_check(update)
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
             return
@@ -107,6 +115,9 @@ class TelegramService:
         text = message.text.strip()
         if text.lower() == self.config.telegram.pnl_trigger.strip().lower():
             await self._send_pnl(update)
+            return
+        if text.lower() == self.config.telegram.take_profit_trigger.strip().lower():
+            await self._send_take_profit_check(update)
             return
         matched, entry_date, error = HypotheticalAnalyzer.parse_request(
             text,
@@ -121,15 +132,25 @@ class TelegramService:
     async def _send_pnl(self, update: Update) -> None:
         try:
             positions = await asyncio.to_thread(self.client.get_open_positions)
-            balance = await asyncio.to_thread(self.client.get_available_balance)
             text = self.trader.format_pnl_message(
                 positions,
                 self.config.trading.settle_coin,
-                balance,
             )
         except Exception as exc:
             logger.exception("Failed to fetch PnL")
             text = f"Ошибка получения PnL: {exc}"
+
+        if update.effective_message:
+            for chunk in self._split_message(text):
+                await update.effective_message.reply_text(chunk)
+
+    async def _send_take_profit_check(self, update: Update) -> None:
+        try:
+            result = await asyncio.to_thread(self.trader.run_take_profit_check)
+            text = self.trader.format_take_profit_check_message(result, manual=True)
+        except Exception as exc:
+            logger.exception("Manual take profit check failed")
+            text = f"Ошибка проверки take profit: {exc}"
 
         if update.effective_message:
             for chunk in self._split_message(text):
@@ -277,6 +298,10 @@ class TelegramService:
         text = self.trader.format_cycle_result_message(result, self.config)
         await self.send_message(text)
 
+    async def notify_take_profit(self, result: TakeProfitCheckResult) -> None:
+        text = self.trader.format_take_profit_check_message(result, manual=False)
+        await self.send_message(text)
+
     def build_application(self) -> Application:
         self.app = (
             Application.builder()
@@ -290,6 +315,9 @@ class TelegramService:
         hypo_command = self.config.telegram.hypothetical_trigger.strip().lstrip("/")
         if hypo_command and hypo_command.isalnum():
             self.app.add_handler(CommandHandler(hypo_command, self.cmd_whatif))
+        tp_command = self.config.telegram.take_profit_trigger.strip().lstrip("/")
+        if tp_command and tp_command.isalnum():
+            self.app.add_handler(CommandHandler(tp_command, self.cmd_tpcheck))
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message)
         )

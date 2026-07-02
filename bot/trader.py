@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from bot.bybit_client import BybitClient, ClosedPosition, ExecutedOrder
+from bot.bybit_client import BybitClient, ClosedPosition, ExecutedOrder, PositionInfo
 from bot.config import AppConfig
 from bot.strategy import Signal, StrategyEngine
 
@@ -18,6 +18,21 @@ class TradingCycleResult:
     short_signals: list[Signal]
     per_symbol_usdt: float
     executed_orders: list[ExecutedOrder]
+
+
+@dataclass
+class TakeProfitCheckResult:
+    enabled: bool
+    triggered: bool
+    open_positions_count: int
+    total_pnl: float
+    total_position_value: float
+    current_pct: float
+    target_pct: float
+    target_pnl_usdt: float
+    remaining_pnl_usdt: float
+    remaining_pct: float
+    closed_positions: list[ClosedPosition]
 
 
 class Trader:
@@ -218,7 +233,6 @@ class Trader:
     def format_pnl_message(
         positions,
         settle_coin: str,
-        balance: float | None = None,
     ) -> str:
         if not positions:
             return "📈 Открытых позиций нет"
@@ -239,13 +253,190 @@ class Trader:
             )
 
         lines.append("")
-        if balance is not None and balance > 0:
+        total_position_value = Trader.portfolio_position_value(positions)
+        if total_position_value > 0:
             lines.append(
                 "Итого uPnL: "
-                + Trader._format_pnl_with_pct(total_pnl, balance, settle_coin)
+                + Trader._format_pnl_with_pct(
+                    total_pnl, total_position_value, settle_coin
+                )
             )
         else:
             lines.append(
                 f"Итого uPnL: {total_pnl:+.4f} {settle_coin}"
             )
+        return "\n".join(lines)
+
+    def take_profit_target_pct(self) -> float:
+        """Target % = sum(uPnL) / sum(position_value), same as /pnl total."""
+        return self.config.trading.take_profit_pct
+
+    @staticmethod
+    def portfolio_position_value(positions: list[PositionInfo]) -> float:
+        return sum(pos.position_value for pos in positions)
+
+    @staticmethod
+    def portfolio_pnl_pct(positions: list[PositionInfo]) -> float:
+        total_pnl = sum(pos.unrealised_pnl for pos in positions)
+        total_value = Trader.portfolio_position_value(positions)
+        if total_value <= 0:
+            return 0.0
+        return total_pnl / total_value * 100.0
+
+    def run_take_profit_check(self) -> TakeProfitCheckResult:
+        cfg = self.config.trading
+        target_pct = self.take_profit_target_pct()
+        positions = self.client.get_open_positions()
+
+        if not positions:
+            return TakeProfitCheckResult(
+                enabled=cfg.take_profit_enabled,
+                triggered=False,
+                open_positions_count=0,
+                total_pnl=0.0,
+                total_position_value=0.0,
+                current_pct=0.0,
+                target_pct=target_pct,
+                target_pnl_usdt=0.0,
+                remaining_pnl_usdt=0.0,
+                remaining_pct=target_pct,
+                closed_positions=[],
+            )
+
+        total_pnl = sum(pos.unrealised_pnl for pos in positions)
+        total_value = self.portfolio_position_value(positions)
+        current_pct = self.portfolio_pnl_pct(positions)
+        target_pnl_usdt = total_value * target_pct / 100.0
+        remaining_pnl_usdt = max(0.0, target_pnl_usdt - total_pnl)
+        remaining_pct = max(0.0, target_pct - current_pct)
+        triggered = cfg.take_profit_enabled and current_pct >= target_pct
+        closed: list[ClosedPosition] = []
+
+        if triggered:
+            logger.info(
+                "Take profit triggered: portfolio %.2f%% >= %.2f%% "
+                "(uPnL=%.4f / position_value=%.4f, positions=%s)",
+                current_pct,
+                target_pct,
+                total_pnl,
+                total_value,
+                len(positions),
+            )
+            closed = self.client.close_all_positions()
+        else:
+            logger.debug(
+                "Take profit not reached: portfolio %.2f%% < target %.2f%% "
+                "(uPnL=%.4f, position_value=%.4f, positions=%s)",
+                current_pct,
+                target_pct,
+                total_pnl,
+                total_value,
+                len(positions),
+            )
+
+        return TakeProfitCheckResult(
+            enabled=cfg.take_profit_enabled,
+            triggered=triggered,
+            open_positions_count=len(positions),
+            total_pnl=total_pnl,
+            total_position_value=total_value,
+            current_pct=current_pct,
+            target_pct=target_pct,
+            target_pnl_usdt=target_pnl_usdt,
+            remaining_pnl_usdt=remaining_pnl_usdt,
+            remaining_pct=remaining_pct,
+            closed_positions=closed,
+        )
+
+    def check_take_profit_and_close(self) -> list[ClosedPosition] | None:
+        result = self.run_take_profit_check()
+        if result.triggered and result.closed_positions:
+            return result.closed_positions
+        return None
+
+    def format_take_profit_check_message(
+        self,
+        result: TakeProfitCheckResult,
+        *,
+        manual: bool = False,
+    ) -> str:
+        cfg = self.config.trading
+        settle_coin = cfg.settle_coin
+        title = "🎯 Проверка take profit"
+        if manual:
+            title += " (вручную)"
+        lines = [title, ""]
+
+        if result.enabled:
+            lines.append("Мониторинг: включён")
+        else:
+            lines.append("Мониторинг: отключён в config (позиции не закроются автоматически)")
+
+        lines.append(f"Открытых позиций: {result.open_positions_count}")
+        lines.append("")
+        lines.append(
+            f"Формула: sum(uPnL) / sum(position_value) "
+            f"(как «Итого uPnL» в /pnl)"
+        )
+        lines.append(
+            f"Цель: {result.target_pct:.2f}% "
+            f"(≈ {cfg.take_profit_pct:.2f}% × x{cfg.leverage} ROI на марже)"
+        )
+        lines.append("")
+
+        if result.open_positions_count == 0:
+            lines.append("Открытых позиций нет — проверять нечего.")
+            return "\n".join(lines)
+
+        lines.append(
+            "Текущая прибыль: "
+            + self._format_pnl_with_pct(
+                result.total_pnl, result.total_position_value, settle_coin
+            )
+        )
+        lines.append(
+            f"Ожидаемая (целевая) прибыль: "
+            f"{result.target_pnl_usdt:+.4f} {settle_coin} "
+            f"(≥ {result.target_pct:.2f}%)"
+        )
+        if result.remaining_pnl_usdt > 0 or result.remaining_pct > 0:
+            lines.append(
+                f"До цели: {result.remaining_pnl_usdt:+.4f} {settle_coin} "
+                f"({result.remaining_pct:.2f}%)"
+            )
+        else:
+            lines.append("До цели: 0 (порог достигнут)")
+
+        lines.append("")
+        if not result.enabled:
+            lines.append(
+                f"Порог {'достигнут' if result.current_pct >= result.target_pct else 'не достигнут'}, "
+                "но take_profit_enabled=false — позиции не закрыты."
+            )
+        elif result.triggered:
+            lines.append("Результат: порог достигнут — закрыты все позиции.")
+            if result.closed_positions:
+                lines.append("")
+                total_closed_pnl = 0.0
+                for pos in result.closed_positions:
+                    side = "Long" if pos.side == "Buy" else "Short"
+                    pnl_text = self._format_pnl_with_pct(
+                        pos.pnl, pos.position_value, settle_coin
+                    )
+                    if pos.success:
+                        total_closed_pnl += pos.pnl
+                        lines.append(f"✅ {pos.symbol} {side}: {pnl_text}")
+                    else:
+                        lines.append(f"❌ {pos.symbol} {side}: {pnl_text}")
+                        if pos.error:
+                            lines.append(f"   {pos.error}")
+                successful = [p for p in result.closed_positions if p.success]
+                if successful:
+                    lines.append("")
+                    lines.append(
+                        f"Итого P/L по закрытым: {total_closed_pnl:+.4f} {settle_coin}"
+                    )
+        else:
+            lines.append("Результат: порог не достигнут — позиции не закрыты.")
+
         return "\n".join(lines)

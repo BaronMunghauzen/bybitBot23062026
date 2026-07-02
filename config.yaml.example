@@ -26,6 +26,11 @@ trading:
   short_max_change_pct: -4.0
   # Position leverage (1 = no leverage)
   leverage: 1
+  # Take profit: close ALL when sum(uPnL)/sum(position_value) >= take_profit_pct
+  # (same % as "Итого uPnL" in /pnl; ≈ take_profit_pct × leverage ROI on margin)
+  take_profit_enabled: true
+  take_profit_pct: 2.0
+  take_profit_check_interval_minutes: 5
   # Account type for balance queries
   account_type: UNIFIED
 
@@ -35,8 +40,10 @@ telegram:
   allowed_user_id: 123456789
   # Message or command that triggers open-positions PnL report
   pnl_trigger: "/pnl"
-  # Hypothetical long PnL: /whatif (today) or /whatif 2026-06-24 (historical entry day, UTC)
+  # Hypothetical long+short PnL: /whatif (today) or /whatif 2026-06-24 (historical, UTC)
   hypothetical_trigger: "/whatif"
+  # Manual take profit check (same logic as 5-min scheduler)
+  take_profit_trigger: "/tpcheck"
   # HTTP proxy for Telegram API (required if Telegram is blocked in your region)
   # Leave proxy_host empty to disable proxy
   proxy_host: ""

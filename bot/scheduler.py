@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.config import AppConfig
 from bot.telegram_bot import TelegramService
@@ -62,6 +63,27 @@ class DailyScheduler:
             )
             raise
 
+    async def run_take_profit_check(self) -> None:
+        cfg = self.config.trading
+        if not cfg.take_profit_enabled:
+            return
+
+        try:
+            result = await asyncio.to_thread(self.trader.run_take_profit_check)
+            if not result.triggered:
+                return
+
+            await self.telegram.notify_take_profit(result)
+            logger.info(
+                "Take profit check closed %s position record(s)",
+                len(result.closed_positions),
+            )
+        except Exception:
+            logger.exception("Take profit check failed")
+            await self.telegram.send_message(
+                "❌ Ошибка проверки take profit. Смотрите логи сервера."
+            )
+
     def start(self) -> None:
         sched = self.config.scheduler
         delay = self.config.trading.delay_after_candle_seconds
@@ -78,6 +100,20 @@ class DailyScheduler:
             replace_existing=True,
             misfire_grace_time=300,
         )
+
+        tp_cfg = self.config.trading
+        if tp_cfg.take_profit_enabled:
+            self.scheduler.add_job(
+                self.run_take_profit_check,
+                IntervalTrigger(
+                    minutes=tp_cfg.take_profit_check_interval_minutes,
+                    timezone=timezone.utc,
+                ),
+                id="take_profit_monitor",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
         self.scheduler.start()
         close_utc = (
             f"{sched.candle_close_hour_utc:02d}:"
@@ -102,6 +138,15 @@ class DailyScheduler:
             run_msk,
             delay,
         )
+        if tp_cfg.take_profit_enabled:
+            logger.info(
+                "Take profit monitor: every %s min, target sum(uPnL)/sum(position_value) "
+                ">= %.2f%% (take_profit_pct, ≈ %.2f%% on margin at x%s)",
+                tp_cfg.take_profit_check_interval_minutes,
+                tp_cfg.take_profit_pct,
+                tp_cfg.take_profit_pct * tp_cfg.leverage,
+                tp_cfg.leverage,
+            )
 
     def shutdown(self) -> None:
         if self.scheduler.running:

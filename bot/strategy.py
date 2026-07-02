@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 
 from bot.bybit_client import BybitClient, SymbolTicker
 from bot.config import TradingConfig
@@ -54,11 +55,39 @@ class StrategyEngine:
 
         return candles
 
-    def _evaluate_long(self, symbol: str, change_pct: float) -> Signal | None:
-        candles = self._load_closed_candles(symbol)
-        if candles is None:
+    def _load_closed_candles_before(
+        self, symbol: str, before_day: date
+    ) -> list[Candle] | None:
+        from datetime import datetime, timezone
+
+        limit = max(self.cfg.min_candles_for_ma, self.cfg.ma_slow) + 5
+        end_ms = int(
+            datetime(
+                before_day.year,
+                before_day.month,
+                before_day.day,
+                tzinfo=timezone.utc,
+            ).timestamp()
+            * 1000
+        ) - 1
+        raw = self.client.get_klines(symbol, limit=limit, end_ms=end_ms)
+        candles = parse_klines(raw)
+
+        if len(candles) < self.cfg.min_candles_for_ma:
+            logger.debug(
+                "%s: not enough historical candles before %s (%s < %s)",
+                symbol,
+                before_day.isoformat(),
+                len(candles),
+                self.cfg.min_candles_for_ma,
+            )
             return None
 
+        return candles
+
+    def _evaluate_long_on_candles(
+        self, symbol: str, change_pct: float, candles: list[Candle]
+    ) -> Signal | None:
         closes = [c.close for c in candles]
         ma_fast = sma(closes, self.cfg.ma_fast)
         ma_slow = sma(closes, self.cfg.ma_slow)
@@ -93,11 +122,20 @@ class StrategyEngine:
             ma_slow=ma_slow,
         )
 
-    def _evaluate_short(self, symbol: str, change_pct: float) -> Signal | None:
-        candles = self._load_closed_candles(symbol)
-        if candles is None:
+    def evaluate_long_at_entry(self, symbol: str, entry_date: date) -> Signal | None:
+        candles = self._load_closed_candles_before(symbol, entry_date)
+        if candles is None or len(candles) < 2:
             return None
 
+        change_pct = daily_change_pct(candles[-1])
+        if change_pct <= self.cfg.long_min_change_pct:
+            return None
+
+        return self._evaluate_long_on_candles(symbol, change_pct, candles)
+
+    def _evaluate_short_on_candles(
+        self, symbol: str, change_pct: float, candles: list[Candle]
+    ) -> Signal | None:
         closes = [c.close for c in candles]
         ma_fast = sma(closes, self.cfg.ma_fast)
         ma_slow = sma(closes, self.cfg.ma_slow)
@@ -132,6 +170,23 @@ class StrategyEngine:
             ma_slow=ma_slow,
         )
 
+    def evaluate_short_at_entry(self, symbol: str, entry_date: date) -> Signal | None:
+        candles = self._load_closed_candles_before(symbol, entry_date)
+        if candles is None or len(candles) < 2:
+            return None
+
+        change_pct = daily_change_pct(candles[-1])
+        if change_pct >= self.cfg.short_max_change_pct:
+            return None
+
+        return self._evaluate_short_on_candles(symbol, change_pct, candles)
+
+    def _evaluate_short(self, symbol: str, change_pct: float) -> Signal | None:
+        candles = self._load_closed_candles(symbol)
+        if candles is None:
+            return None
+        return self._evaluate_short_on_candles(symbol, change_pct, candles)
+
     def scan_long_candidates(self, tickers: list[SymbolTicker]) -> list[Signal]:
         filtered = [
             t
@@ -146,6 +201,12 @@ class StrategyEngine:
             if signal:
                 signals.append(signal)
         return signals
+
+    def _evaluate_long(self, symbol: str, change_pct: float) -> Signal | None:
+        candles = self._load_closed_candles(symbol)
+        if candles is None:
+            return None
+        return self._evaluate_long_on_candles(symbol, change_pct, candles)
 
     def scan_short_candidates(self, tickers: list[SymbolTicker]) -> list[Signal]:
         filtered = [

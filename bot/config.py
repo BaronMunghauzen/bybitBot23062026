@@ -34,6 +34,9 @@ class TradingConfig:
     short_max_change_pct: float
     leverage: int
     account_type: str
+    take_profit_enabled: bool
+    take_profit_pct: float
+    take_profit_check_interval_minutes: int
 
 
 @dataclass
@@ -42,6 +45,7 @@ class TelegramConfig:
     allowed_user_id: int
     pnl_trigger: str
     hypothetical_trigger: str
+    take_profit_trigger: str
     proxy_host: str
     proxy_port: int
     proxy_username: str
@@ -126,6 +130,11 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
             short_max_change_pct=float(trading_raw.get("short_max_change_pct", -4.0)),
             leverage=int(trading_raw.get("leverage", 1)),
             account_type=str(trading_raw.get("account_type", "UNIFIED")),
+            take_profit_enabled=bool(trading_raw.get("take_profit_enabled", True)),
+            take_profit_pct=float(trading_raw.get("take_profit_pct", 2.0)),
+            take_profit_check_interval_minutes=int(
+                trading_raw.get("take_profit_check_interval_minutes", 5)
+            ),
         ),
         telegram=TelegramConfig(
             bot_token=str(_require(telegram_raw, "bot_token")),
@@ -133,6 +142,9 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
             pnl_trigger=str(telegram_raw.get("pnl_trigger", "/pnl")),
             hypothetical_trigger=str(
                 telegram_raw.get("hypothetical_trigger", "/whatif")
+            ),
+            take_profit_trigger=str(
+                telegram_raw.get("take_profit_trigger", "/tpcheck")
             ),
             proxy_host=str(telegram_raw.get("proxy_host", "")),
             proxy_port=int(telegram_raw.get("proxy_port", 0)),
