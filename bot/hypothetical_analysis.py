@@ -34,6 +34,7 @@ class HypotheticalAnalysisResult:
     short_threshold_pct: float
     ma_fast: int
     ma_slow: int
+    signal_avg_candles: int
     long_symbols: list[HypotheticalSymbolResult]
     short_symbols: list[HypotheticalSymbolResult]
     scanned_symbols: int
@@ -148,6 +149,7 @@ class HypotheticalAnalyzer:
                     signal = self.strategy._evaluate_long(
                         ticker.symbol,
                         ticker.change_pct_24h,
+                        ticker.last_price,
                     )
                     if signal is not None:
                         item = self._build_live_result(signal, prices)
@@ -158,6 +160,7 @@ class HypotheticalAnalyzer:
                     signal = self.strategy._evaluate_short(
                         ticker.symbol,
                         ticker.change_pct_24h,
+                        ticker.last_price,
                     )
                     if signal is not None:
                         item = self._build_live_result(signal, prices)
@@ -325,6 +328,7 @@ class HypotheticalAnalyzer:
             short_threshold_pct=self.cfg.short_max_change_pct,
             ma_fast=self.cfg.ma_fast,
             ma_slow=self.cfg.ma_slow,
+            signal_avg_candles=self.cfg.signal_avg_candles,
             long_symbols=long_symbols,
             short_symbols=short_symbols,
             scanned_symbols=total,
@@ -340,9 +344,13 @@ class HypotheticalAnalyzer:
             "",
             "Отбор как в основном алгоритме:",
             f"Long: 24h > {result.long_threshold_pct:.2f}%, "
-            f"MA{result.ma_fast} > MA{result.ma_slow}, +/− свечи, цена > MA{result.ma_fast}",
+            f"MA{result.ma_fast} > MA{result.ma_slow}, +/− свечи, "
+            f"open и close > MA{result.ma_fast}, "
+            f"avg{result.signal_avg_candles} < текущая цена",
             f"Short: 24h < {result.short_threshold_pct:.2f}%, "
-            f"MA{result.ma_fast} < MA{result.ma_slow}, −/+ свечи, цена < MA{result.ma_fast}",
+            f"MA{result.ma_fast} < MA{result.ma_slow}, −/+ свечи, "
+            f"open и close < MA{result.ma_fast}, "
+            f"avg{result.signal_avg_candles} > текущая цена",
             "",
         ]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from bot.bybit_client import BybitClient, SymbolTicker
 from bot.config import TradingConfig
@@ -32,9 +32,18 @@ class StrategyEngine:
         self.client = client
         self.cfg = trading_cfg
 
+    def _min_closed_candles(self) -> int:
+        return max(
+            self.cfg.min_candles_for_ma,
+            self.cfg.ma_slow,
+            self.cfg.signal_avg_candles,
+        )
+
+    def _kline_limit(self) -> int:
+        return self._min_closed_candles() + 5
+
     def _load_closed_candles(self, symbol: str) -> list[Candle] | None:
-        limit = max(self.cfg.min_candles_for_ma, self.cfg.ma_slow) + 5
-        raw = self.client.get_klines(symbol, limit=limit)
+        raw = self.client.get_klines(symbol, limit=self._kline_limit())
         candles = parse_klines(raw)
 
         if len(candles) < 2:
@@ -44,12 +53,12 @@ class StrategyEngine:
         if len(candles) > 1:
             candles = candles[:-1]
 
-        if len(candles) < self.cfg.min_candles_for_ma:
+        if len(candles) < self._min_closed_candles():
             logger.debug(
                 "%s: not enough candles (%s < %s)",
                 symbol,
                 len(candles),
-                self.cfg.min_candles_for_ma,
+                self._min_closed_candles(),
             )
             return None
 
@@ -58,9 +67,6 @@ class StrategyEngine:
     def _load_closed_candles_before(
         self, symbol: str, before_day: date
     ) -> list[Candle] | None:
-        from datetime import datetime, timezone
-
-        limit = max(self.cfg.min_candles_for_ma, self.cfg.ma_slow) + 5
         end_ms = int(
             datetime(
                 before_day.year,
@@ -70,28 +76,61 @@ class StrategyEngine:
             ).timestamp()
             * 1000
         ) - 1
-        raw = self.client.get_klines(symbol, limit=limit, end_ms=end_ms)
+        raw = self.client.get_klines(
+            symbol, limit=self._kline_limit(), end_ms=end_ms
+        )
         candles = parse_klines(raw)
 
-        if len(candles) < self.cfg.min_candles_for_ma:
+        if len(candles) < self._min_closed_candles():
             logger.debug(
                 "%s: not enough historical candles before %s (%s < %s)",
                 symbol,
                 before_day.isoformat(),
                 len(candles),
-                self.cfg.min_candles_for_ma,
+                self._min_closed_candles(),
             )
             return None
 
         return candles
 
+    @staticmethod
+    def _entry_day_open(symbol: str, client: BybitClient, entry_date: date) -> float | None:
+        start_ms = int(
+            datetime(
+                entry_date.year,
+                entry_date.month,
+                entry_date.day,
+                tzinfo=timezone.utc,
+            ).timestamp()
+            * 1000
+        )
+        end_ms = int(
+            datetime(
+                (entry_date + timedelta(days=1)).year,
+                (entry_date + timedelta(days=1)).month,
+                (entry_date + timedelta(days=1)).day,
+                tzinfo=timezone.utc,
+            ).timestamp()
+            * 1000
+        ) - 1
+        raw = client.get_klines(symbol, limit=1, start_ms=start_ms, end_ms=end_ms)
+        candles = parse_klines(raw)
+        if not candles or candles[-1].open <= 0:
+            return None
+        return candles[-1].open
+
     def _evaluate_long_on_candles(
-        self, symbol: str, change_pct: float, candles: list[Candle]
+        self,
+        symbol: str,
+        change_pct: float,
+        candles: list[Candle],
+        current_price: float,
     ) -> Signal | None:
         closes = [c.close for c in candles]
         ma_fast = sma(closes, self.cfg.ma_fast)
         ma_slow = sma(closes, self.cfg.ma_slow)
-        if ma_fast is None or ma_slow is None:
+        recent_avg = sma(closes, self.cfg.signal_avg_candles)
+        if ma_fast is None or ma_slow is None or recent_avg is None:
             return None
 
         if ma_fast <= ma_slow:
@@ -102,17 +141,24 @@ class StrategyEngine:
         if not is_positive(last) or not is_negative(prev):
             return None
 
-        if not (last.open > ma_fast or last.close > ma_fast):
+        if not (last.open > ma_fast and last.close > ma_fast):
+            return None
+
+        if current_price <= 0 or recent_avg >= current_price:
             return None
 
         logger.info(
-            "Long signal: %s change=%.2f%% MA%d=%.6f MA%d=%.6f",
+            "Long signal: %s change=%.2f%% MA%d=%.6f MA%d=%.6f "
+            "avg%d=%.6f price=%.6f",
             symbol,
             change_pct,
             self.cfg.ma_fast,
             ma_fast,
             self.cfg.ma_slow,
             ma_slow,
+            self.cfg.signal_avg_candles,
+            recent_avg,
+            current_price,
         )
         return Signal(
             symbol=symbol,
@@ -131,15 +177,26 @@ class StrategyEngine:
         if change_pct <= self.cfg.long_min_change_pct:
             return None
 
-        return self._evaluate_long_on_candles(symbol, change_pct, candles)
+        current_price = self._entry_day_open(symbol, self.client, entry_date)
+        if current_price is None:
+            return None
+
+        return self._evaluate_long_on_candles(
+            symbol, change_pct, candles, current_price
+        )
 
     def _evaluate_short_on_candles(
-        self, symbol: str, change_pct: float, candles: list[Candle]
+        self,
+        symbol: str,
+        change_pct: float,
+        candles: list[Candle],
+        current_price: float,
     ) -> Signal | None:
         closes = [c.close for c in candles]
         ma_fast = sma(closes, self.cfg.ma_fast)
         ma_slow = sma(closes, self.cfg.ma_slow)
-        if ma_fast is None or ma_slow is None:
+        recent_avg = sma(closes, self.cfg.signal_avg_candles)
+        if ma_fast is None or ma_slow is None or recent_avg is None:
             return None
 
         if ma_fast >= ma_slow:
@@ -150,17 +207,24 @@ class StrategyEngine:
         if not is_negative(last) or not is_positive(prev):
             return None
 
-        if not (last.open < ma_fast or last.close < ma_fast):
+        if not (last.open < ma_fast and last.close < ma_fast):
+            return None
+
+        if current_price <= 0 or recent_avg <= current_price:
             return None
 
         logger.info(
-            "Short signal: %s change=%.2f%% MA%d=%.6f MA%d=%.6f",
+            "Short signal: %s change=%.2f%% MA%d=%.6f MA%d=%.6f "
+            "avg%d=%.6f price=%.6f",
             symbol,
             change_pct,
             self.cfg.ma_fast,
             ma_fast,
             self.cfg.ma_slow,
             ma_slow,
+            self.cfg.signal_avg_candles,
+            recent_avg,
+            current_price,
         )
         return Signal(
             symbol=symbol,
@@ -179,13 +243,23 @@ class StrategyEngine:
         if change_pct >= self.cfg.short_max_change_pct:
             return None
 
-        return self._evaluate_short_on_candles(symbol, change_pct, candles)
+        current_price = self._entry_day_open(symbol, self.client, entry_date)
+        if current_price is None:
+            return None
 
-    def _evaluate_short(self, symbol: str, change_pct: float) -> Signal | None:
+        return self._evaluate_short_on_candles(
+            symbol, change_pct, candles, current_price
+        )
+
+    def _evaluate_short(
+        self, symbol: str, change_pct: float, current_price: float
+    ) -> Signal | None:
         candles = self._load_closed_candles(symbol)
         if candles is None:
             return None
-        return self._evaluate_short_on_candles(symbol, change_pct, candles)
+        return self._evaluate_short_on_candles(
+            symbol, change_pct, candles, current_price
+        )
 
     def scan_long_candidates(self, tickers: list[SymbolTicker]) -> list[Signal]:
         filtered = [
@@ -197,16 +271,24 @@ class StrategyEngine:
 
         signals: list[Signal] = []
         for ticker in filtered:
-            signal = self._evaluate_long(ticker.symbol, ticker.change_pct_24h)
+            signal = self._evaluate_long(
+                ticker.symbol,
+                ticker.change_pct_24h,
+                ticker.last_price,
+            )
             if signal:
                 signals.append(signal)
         return signals
 
-    def _evaluate_long(self, symbol: str, change_pct: float) -> Signal | None:
+    def _evaluate_long(
+        self, symbol: str, change_pct: float, current_price: float
+    ) -> Signal | None:
         candles = self._load_closed_candles(symbol)
         if candles is None:
             return None
-        return self._evaluate_long_on_candles(symbol, change_pct, candles)
+        return self._evaluate_long_on_candles(
+            symbol, change_pct, candles, current_price
+        )
 
     def scan_short_candidates(self, tickers: list[SymbolTicker]) -> list[Signal]:
         filtered = [
@@ -218,7 +300,11 @@ class StrategyEngine:
 
         signals: list[Signal] = []
         for ticker in filtered:
-            signal = self._evaluate_short(ticker.symbol, ticker.change_pct_24h)
+            signal = self._evaluate_short(
+                ticker.symbol,
+                ticker.change_pct_24h,
+                ticker.last_price,
+            )
             if signal:
                 signals.append(signal)
         return signals

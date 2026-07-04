@@ -34,6 +34,7 @@ class TradingConfig:
     short_max_change_pct: float
     leverage: int
     account_type: str
+    signal_avg_candles: int
     take_profit_enabled: bool
     take_profit_pct: float
     take_profit_check_interval_minutes: int
@@ -130,6 +131,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
             short_max_change_pct=float(trading_raw.get("short_max_change_pct", -4.0)),
             leverage=int(trading_raw.get("leverage", 1)),
             account_type=str(trading_raw.get("account_type", "UNIFIED")),
+            signal_avg_candles=int(trading_raw.get("signal_avg_candles", 10)),
             take_profit_enabled=bool(trading_raw.get("take_profit_enabled", True)),
             take_profit_pct=float(trading_raw.get("take_profit_pct", 2.0)),
             take_profit_check_interval_minutes=int(
