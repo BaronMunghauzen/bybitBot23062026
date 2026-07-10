@@ -154,7 +154,7 @@ class HypotheticalAnalyzer:
                     if signal is not None:
                         item = self._build_live_result(signal, prices)
                         if item:
-                            long_results.append(item)
+                            short_results.append(item)
 
                 if ticker.change_pct_24h < self.cfg.short_max_change_pct:
                     signal = self.strategy._evaluate_short(
@@ -165,7 +165,7 @@ class HypotheticalAnalyzer:
                     if signal is not None:
                         item = self._build_live_result(signal, prices)
                         if item:
-                            short_results.append(item)
+                            long_results.append(item)
             except Exception:
                 logger.exception("Hypothetical analysis failed for %s", ticker.symbol)
             finally:
@@ -212,16 +212,7 @@ class HypotheticalAnalyzer:
                     total,
                 )
             try:
-                long_signal = self.strategy.evaluate_long_at_entry(
-                    ticker.symbol,
-                    entry_date,
-                )
-                if long_signal is not None:
-                    item = self._build_historical_result(long_signal, entry_date)
-                    if item:
-                        long_results.append(item)
-
-                short_signal = self.strategy.evaluate_short_at_entry(
+                short_signal = self.strategy.evaluate_long_at_entry(
                     ticker.symbol,
                     entry_date,
                 )
@@ -229,6 +220,15 @@ class HypotheticalAnalyzer:
                     item = self._build_historical_result(short_signal, entry_date)
                     if item:
                         short_results.append(item)
+
+                long_signal = self.strategy.evaluate_short_at_entry(
+                    ticker.symbol,
+                    entry_date,
+                )
+                if long_signal is not None:
+                    item = self._build_historical_result(long_signal, entry_date)
+                    if item:
+                        long_results.append(item)
             except Exception:
                 logger.exception(
                     "Hypothetical historical analysis failed for %s", ticker.symbol
@@ -343,14 +343,12 @@ class HypotheticalAnalyzer:
             "📈 Гипотетический анализ (long + short)",
             "",
             "Отбор как в основном алгоритме:",
-            f"Long: 24h > {result.long_threshold_pct:.2f}%, "
+            f"Short (шаг 4): 24h > {result.long_threshold_pct:.2f}%, "
             f"MA{result.ma_fast} > MA{result.ma_slow}, +/− свечи, "
-            f"open и close > MA{result.ma_fast}, "
-            f"avg{result.signal_avg_candles} < текущая цена",
-            f"Short: 24h < {result.short_threshold_pct:.2f}%, "
+            f"open < MA{result.ma_fast} < close",
+            f"Long (шаг 6): 24h < {result.short_threshold_pct:.2f}%, "
             f"MA{result.ma_fast} < MA{result.ma_slow}, −/+ свечи, "
-            f"open и close < MA{result.ma_fast}, "
-            f"avg{result.signal_avg_candles} > текущая цена",
+            f"close < MA{result.ma_fast} < open",
             "",
         ]
 

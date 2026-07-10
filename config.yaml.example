@@ -21,7 +21,7 @@ trading:
   ma_slow: 200
   # Minimum closed daily candles required for slow MA (skip symbol if less)
   min_candles_for_ma: 200
-  # Average of last N closed daily closes vs current price (long/short filter)
+  # Legacy config key (no longer used in signal filters)
   signal_avg_candles: 10
   # 24h price change thresholds (%)
   long_min_change_pct: 4.0

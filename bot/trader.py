@@ -63,12 +63,12 @@ class Trader:
         closed = closed_positions or []
         closed_symbols = [cp.symbol for cp in closed if cp.success]
 
-        logger.info("Step 3-4: scanning long candidates")
+        logger.info("Step 3-4: scanning high-24h candidates (short entry)")
         tickers = self.client.get_linear_tickers()
-        long_signals = self.strategy.scan_long_candidates(tickers)
+        short_signals = self.strategy.scan_long_candidates(tickers)
 
-        logger.info("Step 5-6: scanning short candidates")
-        short_signals = self.strategy.scan_short_candidates(tickers)
+        logger.info("Step 5-6: scanning low-24h candidates (long entry)")
+        long_signals = self.strategy.scan_short_candidates(tickers)
 
         total_signals = len(long_signals) + len(short_signals)
         per_symbol_usdt = 0.0
