@@ -54,6 +54,7 @@ class ExecutedOrder:
     order_id: str | None
     success: bool
     error: str | None = None
+    leverage: int = 0
 
 
 class BybitClient:
@@ -253,21 +254,102 @@ class BybitClient:
             return ""
         return self._format_qty(rounded, step)
 
-    def set_leverage(self, symbol: str, leverage: int) -> None:
+    def get_max_leverage(self, symbol: str) -> float:
+        """Max leverage for symbol (risk-limit lowest tier, then instrument filter)."""
         try:
-            self._unwrap(
-                self.session.set_leverage(
+            result = self._unwrap(
+                self.session.get_risk_limit(
                     category=self.trading.category,
                     symbol=symbol,
-                    buyLeverage=str(leverage),
-                    sellLeverage=str(leverage),
                 )
             )
+            best: float | None = None
+            for item in result.get("list") or []:
+                item_symbol = item.get("symbol") or symbol
+                if item_symbol != symbol:
+                    continue
+                max_lev = float(item.get("maxLeverage") or 0)
+                if max_lev <= 0:
+                    continue
+                if int(item.get("isLowestRisk") or 0) == 1:
+                    return max_lev
+                if best is None or max_lev > best:
+                    best = max_lev
+            if best is not None:
+                return best
+        except Exception:
+            logger.debug("Could not read risk-limit for %s", symbol, exc_info=True)
+
+        info = self.get_instrument_info(symbol)
+        lev_filter = info.get("leverageFilter") or {}
+        return float(lev_filter.get("maxLeverage") or 1)
+
+    def resolve_common_leverage(self, symbols: list[str], desired: int) -> int:
+        """
+        Uniform leverage for a batch of symbols:
+        min(config desired, min(max leverage among symbols)).
+        """
+        desired = max(1, int(desired))
+        if not symbols:
+            return desired
+
+        caps: list[tuple[str, int]] = []
+        for symbol in symbols:
+            try:
+                max_lev = int(math.floor(self.get_max_leverage(symbol)))
+            except Exception:
+                logger.warning(
+                    "Could not get max leverage for %s; treating as x1",
+                    symbol,
+                    exc_info=True,
+                )
+                max_lev = 1
+            caps.append((symbol, max(1, max_lev)))
+
+        limiting_symbol, group_max = min(caps, key=lambda item: item[1])
+        common = min(desired, group_max)
+        caps_text = ", ".join(f"{sym}=x{lev}" for sym, lev in caps)
+        if common < desired:
+            logger.info(
+                "Common leverage x%s (config x%s), limited by %s (max x%s). "
+                "Per-symbol max: %s",
+                common,
+                desired,
+                limiting_symbol,
+                group_max,
+                caps_text,
+            )
+        else:
+            logger.info(
+                "Common leverage x%s for %s symbols (all support >= config). "
+                "Per-symbol max: %s",
+                common,
+                len(symbols),
+                caps_text,
+            )
+        return common
+
+    def _set_leverage_raw(self, symbol: str, leverage: int) -> None:
+        self._unwrap(
+            self.session.set_leverage(
+                category=self.trading.category,
+                symbol=symbol,
+                buyLeverage=str(leverage),
+                sellLeverage=str(leverage),
+            )
+        )
+
+    def set_leverage(self, symbol: str, leverage: int) -> int:
+        """Set exact leverage for symbol. Returns leverage used (unchanged on 110043)."""
+        desired = max(1, int(leverage))
+        try:
+            self._set_leverage_raw(symbol, desired)
+            return desired
         except (RuntimeError, InvalidRequestError) as exc:
             msg = str(exc).lower()
             if "leverage not modified" in msg or "110043" in msg:
-                logger.debug("Leverage already set for %s: %sx", symbol, leverage)
-                return
+                logger.debug("Leverage already set for %s: %sx", symbol, desired)
+                return desired
             raise
 
     def place_market_order(
@@ -291,8 +373,9 @@ class BybitClient:
     def open_market_position(
         self, symbol: str, side: str, usdt_amount: float, leverage: int
     ) -> ExecutedOrder:
+        effective_leverage = 0
         try:
-            self.set_leverage(symbol, leverage)
+            effective_leverage = self.set_leverage(symbol, leverage)
             ticker = next(
                 (t for t in self.get_linear_tickers() if t.symbol == symbol),
                 None,
@@ -306,9 +389,10 @@ class BybitClient:
                     order_id=None,
                     success=False,
                     error="Could not get last price",
+                    leverage=effective_leverage,
                 )
 
-            notional = usdt_amount * leverage
+            notional = usdt_amount * effective_leverage
             qty = self._round_qty(
                 notional / ticker.last_price, symbol, market_order=True
             )
@@ -321,10 +405,19 @@ class BybitClient:
                     order_id=None,
                     success=False,
                     error="Calculated qty below minimum",
+                    leverage=effective_leverage,
                 )
 
             result = self.place_market_order(symbol, side, qty)
             order_id = (result.get("orderId") or None)
+            logger.info(
+                "Opened %s %s qty=%s margin=%.4f leverage=x%s",
+                symbol,
+                side,
+                qty,
+                usdt_amount,
+                effective_leverage,
+            )
             return ExecutedOrder(
                 symbol=symbol,
                 side=side,
@@ -332,6 +425,7 @@ class BybitClient:
                 usdt_amount=usdt_amount,
                 order_id=order_id,
                 success=True,
+                leverage=effective_leverage,
             )
         except Exception as exc:
             logger.exception("Failed to open position for %s", symbol)
@@ -343,6 +437,7 @@ class BybitClient:
                 order_id=None,
                 success=False,
                 error=str(exc),
+                leverage=effective_leverage,
             )
 
     def get_open_positions(self) -> list[PositionInfo]:

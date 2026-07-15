@@ -140,8 +140,10 @@ class DailyScheduler:
         )
         if tp_cfg.take_profit_enabled:
             logger.info(
-                "Take profit monitor: every %s min, target sum(uPnL)/sum(position_value) "
-                ">= %.2f%% (take_profit_pct, ≈ %.2f%% on margin at x%s)",
+                "Take profit monitor: every %s min, target sum(uPnL)/sum(margin) "
+                ">= take_profit_pct × avg_leverage "
+                "(config: %.2f%% notional ≈ %.2f%% margin ROI at x%s; "
+                "avg leverage uses actual per-symbol leverages)",
                 tp_cfg.take_profit_check_interval_minutes,
                 tp_cfg.take_profit_pct,
                 tp_cfg.take_profit_pct * tp_cfg.leverage,

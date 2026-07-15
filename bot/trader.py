@@ -18,6 +18,7 @@ class TradingCycleResult:
     short_signals: list[Signal]
     per_symbol_usdt: float
     executed_orders: list[ExecutedOrder]
+    leverage: int = 0
 
 
 @dataclass
@@ -27,6 +28,8 @@ class TakeProfitCheckResult:
     open_positions_count: int
     total_pnl: float
     total_position_value: float
+    total_margin: float
+    avg_leverage: float
     current_pct: float
     target_pct: float
     target_pnl_usdt: float
@@ -83,6 +86,7 @@ class Trader:
                 short_signals=short_signals,
                 per_symbol_usdt=0.0,
                 executed_orders=executed,
+                leverage=0,
             )
 
         logger.info(
@@ -91,12 +95,16 @@ class Trader:
         per_symbol_usdt = balance / total_signals
 
         all_signals = long_signals + short_signals
+        symbols = [signal.symbol for signal in all_signals]
+        common_leverage = self.client.resolve_common_leverage(
+            symbols, cfg.leverage
+        )
         logger.info(
-            "Step 8: opening %s positions (%.4f %s each, leverage x%s)",
+            "Step 8: opening %s positions (%.4f %s each, common leverage x%s)",
             total_signals,
             per_symbol_usdt,
             cfg.settle_coin,
-            cfg.leverage,
+            common_leverage,
         )
 
         for signal in all_signals:
@@ -104,7 +112,7 @@ class Trader:
                 symbol=signal.symbol,
                 side=signal.side,
                 usdt_amount=per_symbol_usdt,
-                leverage=cfg.leverage,
+                leverage=common_leverage,
             )
             executed.append(order)
 
@@ -115,6 +123,7 @@ class Trader:
             short_signals=short_signals,
             per_symbol_usdt=per_symbol_usdt,
             executed_orders=executed,
+            leverage=common_leverage,
         )
 
     def run_daily_cycle(self) -> tuple[TradingCycleResult, list[ClosedPosition]]:
@@ -205,9 +214,13 @@ class Trader:
         )
 
         if result.long_signals or result.short_signals:
+            lev = result.leverage or cfg.trading.leverage
+            lev_note = f"плечо x{lev}"
+            if result.leverage and result.leverage < cfg.trading.leverage:
+                lev_note += f" (config x{cfg.trading.leverage}, взято min max по группе)"
             lines.append(
                 f"На каждый символ: {result.per_symbol_usdt:.4f} "
-                f"{cfg.trading.settle_coin} (плечо x{cfg.trading.leverage})"
+                f"{cfg.trading.settle_coin} ({lev_note})"
             )
 
         if result.executed_orders:
@@ -216,9 +229,10 @@ class Trader:
             for order in result.executed_orders:
                 status = "✅" if order.success else "❌"
                 side_label = "Long" if order.side == "Buy" else "Short"
+                lev = order.leverage or result.leverage or cfg.trading.leverage
                 line = (
                     f"{status} {order.symbol} {side_label} "
-                    f"qty={order.qty} margin={order.usdt_amount:.4f}"
+                    f"qty={order.qty} margin={order.usdt_amount:.4f} x{lev}"
                 )
                 if order.error:
                     line += f" — {Trader._short_error(order.error)}"
@@ -242,8 +256,9 @@ class Trader:
         for pos in positions:
             total_pnl += pos.unrealised_pnl
             side = "Long" if pos.side == "Buy" else "Short"
+            margin = Trader.position_margin(pos)
             pnl_text = Trader._format_pnl_with_pct(
-                pos.unrealised_pnl, pos.position_value, settle_coin
+                pos.unrealised_pnl, margin, settle_coin
             )
             lines.append(
                 f"{pos.symbol} {side} x{pos.leverage}\n"
@@ -253,13 +268,14 @@ class Trader:
             )
 
         lines.append("")
-        total_position_value = Trader.portfolio_position_value(positions)
-        if total_position_value > 0:
+        total_margin = Trader.portfolio_margin(positions)
+        if total_margin > 0:
             lines.append(
                 "Итого uPnL: "
                 + Trader._format_pnl_with_pct(
-                    total_pnl, total_position_value, settle_coin
+                    total_pnl, total_margin, settle_coin
                 )
+                + " (ROI на марже)"
             )
         else:
             lines.append(
@@ -267,26 +283,56 @@ class Trader:
             )
         return "\n".join(lines)
 
-    def take_profit_target_pct(self) -> float:
-        """Target % = sum(uPnL) / sum(position_value), same as /pnl total."""
-        return self.config.trading.take_profit_pct
+    @staticmethod
+    def position_margin(pos: PositionInfo) -> float:
+        leverage = float(pos.leverage or 1) or 1.0
+        return pos.position_value / leverage
 
     @staticmethod
     def portfolio_position_value(positions: list[PositionInfo]) -> float:
         return sum(pos.position_value for pos in positions)
 
     @staticmethod
+    def portfolio_margin(positions: list[PositionInfo]) -> float:
+        return sum(Trader.position_margin(pos) for pos in positions)
+
+    @staticmethod
+    def portfolio_avg_leverage(positions: list[PositionInfo]) -> float:
+        total_margin = Trader.portfolio_margin(positions)
+        if total_margin <= 0:
+            return 1.0
+        return Trader.portfolio_position_value(positions) / total_margin
+
+    def take_profit_target_pct(
+        self, positions: list[PositionInfo] | None = None
+    ) -> float:
+        """
+        Target ROI % on deployed margin.
+
+        Config take_profit_pct is a notional (price-move) target; equivalent
+        margin ROI uses the portfolio's actual average leverage so mixed
+        leverages are handled correctly.
+        """
+        cfg = self.config.trading
+        if positions:
+            avg_lev = self.portfolio_avg_leverage(positions)
+            if avg_lev > 0:
+                return cfg.take_profit_pct * avg_lev
+        return cfg.take_profit_pct * cfg.leverage
+
+    @staticmethod
     def portfolio_pnl_pct(positions: list[PositionInfo]) -> float:
+        """Unrealized PnL as % of deployed margin (per-symbol leverage aware)."""
         total_pnl = sum(pos.unrealised_pnl for pos in positions)
-        total_value = Trader.portfolio_position_value(positions)
-        if total_value <= 0:
+        total_margin = Trader.portfolio_margin(positions)
+        if total_margin <= 0:
             return 0.0
-        return total_pnl / total_value * 100.0
+        return total_pnl / total_margin * 100.0
 
     def run_take_profit_check(self) -> TakeProfitCheckResult:
         cfg = self.config.trading
-        target_pct = self.take_profit_target_pct()
         positions = self.client.get_open_positions()
+        target_pct = self.take_profit_target_pct(positions)
 
         if not positions:
             return TakeProfitCheckResult(
@@ -295,6 +341,8 @@ class Trader:
                 open_positions_count=0,
                 total_pnl=0.0,
                 total_position_value=0.0,
+                total_margin=0.0,
+                avg_leverage=float(cfg.leverage),
                 current_pct=0.0,
                 target_pct=target_pct,
                 target_pnl_usdt=0.0,
@@ -305,8 +353,10 @@ class Trader:
 
         total_pnl = sum(pos.unrealised_pnl for pos in positions)
         total_value = self.portfolio_position_value(positions)
+        total_margin = self.portfolio_margin(positions)
+        avg_leverage = self.portfolio_avg_leverage(positions)
         current_pct = self.portfolio_pnl_pct(positions)
-        target_pnl_usdt = total_value * target_pct / 100.0
+        target_pnl_usdt = total_margin * target_pct / 100.0
         remaining_pnl_usdt = max(0.0, target_pnl_usdt - total_pnl)
         remaining_pct = max(0.0, target_pct - current_pct)
         triggered = cfg.take_profit_enabled and current_pct >= target_pct
@@ -314,23 +364,25 @@ class Trader:
 
         if triggered:
             logger.info(
-                "Take profit triggered: portfolio %.2f%% >= %.2f%% "
-                "(uPnL=%.4f / position_value=%.4f, positions=%s)",
+                "Take profit triggered: margin ROI %.2f%% >= %.2f%% "
+                "(uPnL=%.4f / margin=%.4f, avg_lev=x%.2f, positions=%s)",
                 current_pct,
                 target_pct,
                 total_pnl,
-                total_value,
+                total_margin,
+                avg_leverage,
                 len(positions),
             )
             closed = self.client.close_all_positions()
         else:
             logger.debug(
-                "Take profit not reached: portfolio %.2f%% < target %.2f%% "
-                "(uPnL=%.4f, position_value=%.4f, positions=%s)",
+                "Take profit not reached: margin ROI %.2f%% < target %.2f%% "
+                "(uPnL=%.4f, margin=%.4f, avg_lev=x%.2f, positions=%s)",
                 current_pct,
                 target_pct,
                 total_pnl,
-                total_value,
+                total_margin,
+                avg_leverage,
                 len(positions),
             )
 
@@ -340,6 +392,8 @@ class Trader:
             open_positions_count=len(positions),
             total_pnl=total_pnl,
             total_position_value=total_value,
+            total_margin=total_margin,
+            avg_leverage=avg_leverage,
             current_pct=current_pct,
             target_pct=target_pct,
             target_pnl_usdt=target_pnl_usdt,
@@ -375,12 +429,13 @@ class Trader:
         lines.append(f"Открытых позиций: {result.open_positions_count}")
         lines.append("")
         lines.append(
-            f"Формула: sum(uPnL) / sum(position_value) "
-            f"(как «Итого uPnL» в /pnl)"
+            "Формула: sum(uPnL) / sum(margin), "
+            "margin = position_value / leverage по каждому символу"
         )
         lines.append(
-            f"Цель: {result.target_pct:.2f}% "
-            f"(≈ {cfg.take_profit_pct:.2f}% × x{cfg.leverage} ROI на марже)"
+            f"Цель: {result.target_pct:.2f}% ROI на марже "
+            f"(take_profit_pct {cfg.take_profit_pct:.2f}% × "
+            f"среднее плечо x{result.avg_leverage:.2f})"
         )
         lines.append("")
 
@@ -391,13 +446,18 @@ class Trader:
         lines.append(
             "Текущая прибыль: "
             + self._format_pnl_with_pct(
-                result.total_pnl, result.total_position_value, settle_coin
+                result.total_pnl, result.total_margin, settle_coin
             )
+            + " (ROI на марже)"
+        )
+        lines.append(
+            f"Маржа портфеля: {result.total_margin:.4f} {settle_coin}, "
+            f"notional: {result.total_position_value:.4f} {settle_coin}"
         )
         lines.append(
             f"Ожидаемая (целевая) прибыль: "
             f"{result.target_pnl_usdt:+.4f} {settle_coin} "
-            f"(≥ {result.target_pct:.2f}%)"
+            f"(≥ {result.target_pct:.2f}% ROI)"
         )
         if result.remaining_pnl_usdt > 0 or result.remaining_pct > 0:
             lines.append(
